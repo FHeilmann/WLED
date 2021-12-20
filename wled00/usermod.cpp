@@ -56,8 +56,6 @@ void userSetup() {
 
   pinMode(LED_BUILTIN, OUTPUT);
 
-  sampling_period_us = round(1000000*(1.0/SAMPLE_RATE));
-
   // Define the FFT Task and lock it to core 0
   xTaskCreatePinnedToCore(
         FFTcode,                          // Function to implement the task

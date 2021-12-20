@@ -8,6 +8,8 @@
    Until this configuration is moved to the webinterface
 */
 
+typedef float fftData_t;
+
 #ifndef MCLK_PIN
     int mclkPin = 0;
 #else
@@ -61,7 +63,7 @@ public:
        Read num_samples from the microphone, and store them in the provided
        buffer
     */
-    virtual void getSamples(double *buffer, uint16_t num_samples) = 0;
+    virtual void getSamples(fftData_t *buffer, uint16_t num_samples) = 0;
 
     /* Get an up-to-date sample without DC offset */
     virtual int getSampleWithoutDCOffset() = 0;
@@ -151,7 +153,7 @@ public:
         }
     }
 
-    virtual void getSamples(double *buffer, uint16_t num_samples) {
+    virtual void getSamples(fftData_t *buffer, uint16_t num_samples) {
         if(_initialized) {
             esp_err_t err;
             size_t bytes_read = 0;        /* Counter variable to check if we actually got enough data */
@@ -175,7 +177,7 @@ public:
             // Store samples in sample buffer and update DC offset
             for (int i = 0; i < num_samples; i++) {
                 // From the old code.
-                double sample = (double)abs((samples[i] >> _shift));
+                fftData_t sample = (fftData_t)(samples[i] >> _shift);
                 buffer[i] = sample;
                 _dcOffset = ((_dcOffset * 31) + sample) / 32;
             }
@@ -344,7 +346,7 @@ public:
         _initialized = true;
     }
 
-    void getSamples(double *buffer, uint16_t num_samples) {
+    void getSamples(fftData_t *buffer, uint16_t num_samples) {
 
     /* Enable ADC. This has to be enabled and disabled directly before and
     after sampling, otherwise Wifi dies
@@ -415,4 +417,108 @@ public:
             .data_in_num = i2ssdPin
         };
     }
+};
+
+// max level becomes 0 db
+// attenuation -> signal to 0 (-inf db)
+// threshhold -> release: -1dB - soundSquelch db
+// threshhold -> attack: 0dB - soundSquelch db
+
+enum NoiseGateState {
+    NG_HOLD_OPEN = 0,
+    NG_OPEN = 1,
+    NG_RELEASE = 2,
+    NG_HOLD_CLOSED = 3,
+    NG_CLOSED = 4,
+    NG_ATTACK = 5,
+};
+class NoiseGate {
+    private:
+        NoiseGateState _state;
+        int _sampleRate;
+        int16_t _attackSamples;
+        int16_t _releaseSamples;
+        int16_t _holdSamples;
+        int16_t _attackCounter;
+        int16_t _holdCounter;
+        int16_t _releaseCounter;
+        fftData_t _rollingAverage;
+    public:
+    NoiseGate(int sampleRate, uint16_t attackMs = 10, uint16_t releaseMs = 10, uint16_t holdMs = 20) : _sampleRate(sampleRate), _attackSamples(attackMs * sampleRate / 1000), _releaseSamples(releaseMs * sampleRate / 1000), _holdSamples(holdMs * sampleRate / 1000) {
+        _releaseCounter = _attackCounter = 0;
+        _holdCounter = _holdSamples;
+        _state = NG_HOLD_OPEN;
+        _rollingAverage = 0.0;
+    };
+    void processSamples(fftData_t *samples, uint16_t len, uint8_t soundSquelch) {
+        if (soundSquelch == 0) {
+            return;
+        }
+        uint16_t lower_threshhold = soundSquelch * 2;
+        uint16_t upper_threshhold = soundSquelch * 3;
+        for (int i = 0; i < len; i++) {
+            _rollingAverage = (1.0 - 1.0/100)*_rollingAverage + fabs(samples[i])/100;
+            switch (_state) {
+                case NG_HOLD_OPEN:
+                    _holdCounter--;
+                    if (_holdCounter <= 0) {
+                        _state = NG_OPEN;
+                    }
+                    break;
+                case NG_OPEN:
+                    if (_rollingAverage < lower_threshhold) {
+                        _releaseCounter = _releaseSamples;
+                        _state = NG_RELEASE;
+                    }
+                    break;
+                case NG_RELEASE:
+                    if (_rollingAverage > upper_threshhold) {
+                        _state = NG_OPEN;
+                    } else {
+                        _releaseCounter--;
+                        // samples[i] = samples[i] * (double)(_releaseCounter/_releaseSamples);
+                        if (_releaseCounter <= 0) {
+                            _holdCounter = _holdSamples;
+                            _state = NG_HOLD_CLOSED;
+                        }
+                    }
+                    break;
+                case NG_HOLD_CLOSED:
+                    _holdCounter--;
+                    if (_holdCounter <= 0) {
+                        _state = NG_CLOSED;
+                    }
+                    break;
+                case NG_CLOSED:
+                    if (_rollingAverage > upper_threshhold) {
+                        _attackCounter = _attackSamples;
+                        _state = NG_ATTACK;
+                    } else {
+                        samples[i] = 0.0;
+                    }
+                    break;
+                case NG_ATTACK:
+                    if (_rollingAverage < lower_threshhold) {
+                        _state = NG_CLOSED;
+                    } else {
+                        _attackCounter--;
+                        // samples[i] = samples[i] * (1.0 - (double)(_releaseCounter/_releaseSamples));
+                        if (_attackCounter <= 0) {
+                            _holdCounter = _holdSamples;
+                            _state = NG_HOLD_OPEN;
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
+
+        }
+        // Serial.printf("%d\n", _state);
+    }
+
+    NoiseGateState getState() {
+        return _state;
+    }
+
 };

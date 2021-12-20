@@ -42,7 +42,7 @@ AudioSource *audioSource;
 
 const i2s_port_t I2S_PORT = I2S_NUM_0;
 const int BLOCK_SIZE = 64;
-const int SAMPLE_RATE = 10240;                  // Base sample rate in Hz
+const int SAMPLE_RATE = 16000;                  // Base sample rate in Hz
 
 //Use userVar0 and userVar1 (API calls &U0=,&U1=, uint16_t)
 
@@ -79,30 +79,31 @@ float weighting = 0.2;                          // Exponential filter weighting.
 
 // FFT Variables
 const uint16_t samples = 512;                   // This value MUST ALWAYS be a power of 2
-unsigned int sampling_period_us;
-unsigned long microseconds;
+// unsigned int sampling_period_us;
+// unsigned long microseconds;
 
 double FFT_MajorPeak = 0;
 double FFT_Magnitude = 0;
-uint16_t mAvg = 0;
+// uint16_t mAvg = 0;
 
 // These are the input and output vectors.  Input vectors receive computed results from FFT.
-double vReal[samples];
-double vImag[samples];
-double fftBin[samples];
+fftData_t vReal[samples];
+fftData_t vImag[samples];
+fftData_t fftBin[samples];
+fftData_t windowWeighingFactors[samples];
 
 // Try and normalize fftBin values to a max of 4096, so that 4096/16 = 256.
 // Oh, and bins 0,1,2 are no good, so we'll zero them out.
-double fftCalc[16];
+// double fftCalc[16];
 int fftResult[16];                              // Our calculated result table, which we feed to the animations.
-double fftResultMax[16];                        // A table used for testing to determine how our post-processing is working.
-float fftAvg[16];
+// double fftResultMax[16];                        // A table used for testing to determine how our post-processing is working.
+// float fftAvg[16];
 
 // Table of linearNoise results to be multiplied by soundSquelch in order to reduce squelch across fftResult bins.
-int linearNoise[16] = { 34, 28, 26, 25, 20, 12, 9, 6, 4, 4, 3, 2, 2, 2, 2, 2 };
+// int linearNoise[16] = { 34, 28, 26, 25, 20, 12, 9, 6, 4, 4, 3, 2, 2, 2, 2, 2 };
 
 // Table of multiplication factors so that we can even out the frequency response.
-double fftResultPink[16] = {1.70,1.71,1.73,1.78,1.68,1.56,1.55,1.63,1.79,1.62,1.80,2.06,2.47,3.35,6.83,9.55};
+// double fftResultPink[16] = {1.70,1.71,1.73,1.78,1.68,1.56,1.55,1.63,1.79,1.62,1.80,2.06,2.47,3.35,6.83,9.55};
 
 
 struct audioSyncPacket {
@@ -146,16 +147,16 @@ void getSample() {
     DEBUGSR_PRINT("\t\t"); DEBUGSR_PRINT(micIn);
 /*-------END DEBUG-------*/
   #endif
-  micLev = ((micLev * 31) + micIn) / 32;          // Smooth it out over the last 32 samples for automatic centering
-  micIn -= micLev;                                // Let's center it to 0 now
-  micIn = abs(micIn);                             // And get the absolute value of each sample
+  // micLev = ((micLev * 31) + micIn) / 32;          // Smooth it out over the last 32 samples for automatic centering
+  // micIn -= micLev;                                // Let's center it to 0 now
+  // micIn = abs(micIn);                             // And get the absolute value of each sample
 /*---------DEBUG---------*/
   DEBUGSR_PRINT("\t\t"); DEBUGSR_PRINT(micIn);
 /*-------END DEBUG-------*/
 
 // Using an exponential filter to smooth out the signal. We'll add controls for this in a future release.
   expAdjF = (weighting * micIn + (1.0-weighting) * expAdjF);
-  expAdjF = (expAdjF <= soundSquelch) ? 0: expAdjF;
+  // expAdjF = (expAdjF <= soundSquelch) ? 0: expAdjF;
 
   tmpSample = (int)expAdjF;
 
@@ -207,11 +208,78 @@ void agcAvg() {
 } // agcAvg()
 
 
+////////////////////
+// Begin FHEilmann changes
+/////////////////////
+#define ALPHA_SIGNAL 0.005f
+#define ALPHA_MINMAX 0.99f
+
+typedef struct {
+  uint16_t start_bin;
+  uint16_t end_bin;
+  uint16_t freq_value;
+  float value;
+  float value_db;
+} frequency_bin;
+
+typedef struct {
+  float max;
+  float min;
+  float avg;
+  bool initialized;
+} spectrum_stats;
+
+frequency_bin frequency_bins[16];
+spectrum_stats stats[16];
+
+void computeBinParams() {
+
+  uint32_t max_freq = SAMPLE_RATE/2;
+  uint16_t num_samples = samples >> 1;
+  uint8_t num_bins = 16;
+  uint16_t freq_per_bin = (max_freq/num_samples);
+  uint16_t min_freq = (max_freq/num_samples) * 3;
+  float multiplier = pow((max_freq / min_freq),  (1.0f/num_bins));
+  uint16_t start_freq = 0;
+  uint16_t end_freq = min_freq;
+  uint16_t bin_counter = 3;
+  uint16_t start_bin = 0;
+  uint16_t end_bin = 0;
+  for (int bin = 0; bin < num_bins; bin++) {
+    start_freq = end_freq;
+    end_freq = start_freq * multiplier;
+    start_bin = max(uint16_t(floor(start_freq / freq_per_bin)), bin_counter);
+    end_bin = min(num_samples - 1, max(int(ceil(end_freq / freq_per_bin)), bin_counter + 1));
+    // On the last frequency, make sure we're using all bins.
+    if ((bin == num_bins - 1) && (end_bin < num_samples - 1))
+      end_bin = num_samples - 1;
+
+
+    bin_counter = end_bin;
+    uint16_t freq_value = (end_bin + start_bin) * freq_per_bin  / 2;
+
+    frequency_bins[bin] = {
+      .start_bin = start_bin,
+      .end_bin = end_bin,
+      .freq_value = freq_value,
+      .value = 0.0,
+      .value_db = 0.0,
+    };
+    stats[bin] = {
+      .max = 0.0,
+      .min = 0.0,
+      .avg = 0.0,
+      .initialized = false
+    };
+  }
+}
+
 
 ////////////////////
 // Begin FFT Code //
 ////////////////////
-
+#define FFT_SQRT_APPROXIMATION
+#define FFT_SPEED_OVER_PRECISION
 #include "arduinoFFT.h"
 
 void transmitAudioData() {
@@ -251,25 +319,17 @@ void transmitAudioData() {
 } // transmitAudioData()
 
 
-
-
 // Create FFT object
-arduinoFFT FFT = arduinoFFT( vReal, vImag, samples, SAMPLE_RATE );
-
-double fftAdd( int from, int to) {
-  int i = from;
-  double result = 0;
-  while ( i <= to) {
-    result += fftBin[i++];
-  }
-  return result;
-}
+ArduinoFFT<fftData_t> FFT = ArduinoFFT<fftData_t>( vReal, vImag, samples, SAMPLE_RATE, windowWeighingFactors);
 
 // FFT main code
 void FFTcode( void * parameter) {
   DEBUG_PRINT("FFT running on core: "); DEBUG_PRINTLN(xPortGetCoreID());
-
+  computeBinParams();
+  NoiseGate gate(SAMPLE_RATE, 200, 1000, 500);
+  TickType_t xLastWakeTime;
   for(;;) {
+    xLastWakeTime = xTaskGetTickCount();
     delay(1);           // DO NOT DELETE THIS LINE! It is needed to give the IDLE(0) task enough time and to keep the watchdog happy.
                         // taskYIELD(), yield(), vTaskDelay() and esp_task_wdt_feed() didn't seem to work.
 
@@ -278,94 +338,138 @@ void FFTcode( void * parameter) {
       continue;
     audioSource->getSamples(vReal, samples);
 
-    // Last sample in vReal is our current mic sample
-    micDataSm = (uint16_t)vReal[samples - 1];
-
-    // micDataSm = ((micData * 3) + micData)/4;
-
     for (int i=0; i < samples; i++)
     {
       vImag[i] = 0;
     }
 
-    FFT.Windowing( FFT_WIN_TYP_HAMMING, FFT_FORWARD );      // Weigh data
-    FFT.Compute( FFT_FORWARD );                             // Compute FFT
-    FFT.ComplexToMagnitude();                               // Compute magnitudes
+    FFT.dcRemoval();
+
+    gate.processSamples(vReal, samples, soundSquelch);
+
+    NoiseGateState ngState = gate.getState();
+    if ((ngState == NG_HOLD_CLOSED) || (ngState == NG_CLOSED) || (ngState == NG_ATTACK)) {
+      // Last sample in vReal is our current mic sample
+    } else {
+      micDataSm = 0;
+    }
+
+    FFT.windowing( FFTWindow::Hamming, FFTDirection::Forward);   // Weigh data
+    FFT.compute( FFTDirection::Forward );                             // Compute FFT
+    FFT.complexToMagnitude();                               // Compute magnitudes
 
     //
     // vReal[3 .. 255] contain useful data, each a 20Hz interval (60Hz - 5120Hz).
     // There could be interesting data at bins 0 to 2, but there are too many artifacts.
     //
-    FFT.MajorPeak(&FFT_MajorPeak, &FFT_Magnitude);          // let the effects know which freq was most dominant
+    fftData_t peak, magnitude;
+    FFT.majorPeak(peak, magnitude);      // let the effects know which freq was most dominant
+    FFT_MajorPeak = double(peak);
+    FFT_Magnitude = double(magnitude);
+    /* This FFT post processing is a DIY endeavour. What we really need is someone with sound engineering expertise to do a great job here AND most importantly, that the animations look GREAT as a result.
+    *
+    *
+    * Andrew's updated mapping of 256 bins down to the 16 result bins with Sample Freq = 10240, samples = 512 and some overlap.
+    * Based on testing, the lowest/Start frequency is 60 Hz (with bin 3) and a highest/End frequency of 5120 Hz in bin 255.
+    * Now, Take the 60Hz and multiply by 1.320367784 to get the next frequency and so on until the end. Then detetermine the bins.
+    * End frequency = Start frequency * multiplier ^ 16
+    * Multiplier = (End frequency/ Start frequency) ^ 1/16
+    * Multiplier = 1.320367784
+    */
 
-    for (int i = 0; i < samples; i++) {                     // Values for bins 0 and 1 are WAY too large. Might as well start at 3.
-      double t = 0.0;
-      t = abs(vReal[i]);
-      t = t / 16.0;                                         // Reduce magnitude. Want end result to be linear and ~4096 max.
-      fftBin[i] = t;
-    } // for()
+    // Only adjust AGC when noise-gate is open
+    if (!((ngState == NG_HOLD_CLOSED) || (ngState == NG_CLOSED))) {
+      fftData_t fft_old, fft_new, avg_target;
+      for (int bin = 0; bin < 16; bin++ ) {
+            frequency_bin* freq_bin = &frequency_bins[bin];
 
+            // We want the average to sit at ~10% of the spectrum between min and max
+            avg_target = stats[bin].min + (stats[bin].max - stats[bin].min + 0.0001) * 0.1;
 
-/* This FFT post processing is a DIY endeavour. What we really need is someone with sound engineering expertise to do a great job here AND most importantly, that the animations look GREAT as a result.
- *
- *
- * Andrew's updated mapping of 256 bins down to the 16 result bins with Sample Freq = 10240, samples = 512 and some overlap.
- * Based on testing, the lowest/Start frequency is 60 Hz (with bin 3) and a highest/End frequency of 5120 Hz in bin 255.
- * Now, Take the 60Hz and multiply by 1.320367784 to get the next frequency and so on until the end. Then detetermine the bins.
- * End frequency = Start frequency * multiplier ^ 16
- * Multiplier = (End frequency/ Start frequency) ^ 1/16
- * Multiplier = 1.320367784
- */
+            // Grow min and decay max if the average moves away from the setpoint
+            if (stats[bin].initialized) {
+              if (stats[bin].avg > avg_target + 3.0) {
+                stats[bin].min = min( stats[bin].min / ALPHA_MINMAX, stats[bin].avg - 1.0f);
+              }
 
-//                                               Range
-      fftCalc[0] = (fftAdd(3,4)) /2;        // 60 - 100
-      fftCalc[1] = (fftAdd(4,5)) /2;        // 80 - 120
-      fftCalc[2] = (fftAdd(5,7)) /3;        // 100 - 160
-      fftCalc[3] = (fftAdd(7,9)) /3;        // 140 - 200
-      fftCalc[4] = (fftAdd(9,12)) /4;       // 180 - 260
-      fftCalc[5] = (fftAdd(12,16)) /5;      // 240 - 340
-      fftCalc[6] = (fftAdd(16,21)) /6;      // 320 - 440
-      fftCalc[7] = (fftAdd(21,28)) /8;      // 420 - 600
-      fftCalc[8] = (fftAdd(29,37)) /10;     // 580 - 760
-      fftCalc[9] = (fftAdd(37,48)) /12;     // 740 - 980
-      fftCalc[10] = (fftAdd(48,64)) /17;    // 960 - 1300
-      fftCalc[11] = (fftAdd(64,84)) /21;    // 1280 - 1700
-      fftCalc[12] = (fftAdd(84,111)) /28;   // 1680 - 2240
-      fftCalc[13] = (fftAdd(111,147)) /37;  // 2220 - 2960
-      fftCalc[14] = (fftAdd(147,194)) /48;  // 2940 - 3900
-      fftCalc[15] = (fftAdd(194, 255)) /62; // 3880 - 5120
+              if (stats[bin].avg < avg_target - 3.0) {
+                stats[bin].max = max( stats[bin].max * ALPHA_MINMAX, stats[bin].avg + 1.0f);
+              }
+            }
 
+            // Compute new FFT value for this bin
+            fft_old = freq_bin->value;
+            fft_new = 0.0;
+            for (int cnt = freq_bin->start_bin; cnt <= freq_bin->end_bin; cnt++) {
+              fft_new += vReal[cnt];
+            }
+            fft_new /= freq_bin->end_bin - freq_bin->start_bin + 1;
 
-//   Noise supression of fftCalc bins using soundSquelch adjustment for different input types.
-    for (int i=0; i < 16; i++) {
-        fftCalc[i] = fftCalc[i]-(float)soundSquelch*(float)linearNoise[i]/4.0 <= 0? 0 : fftCalc[i];
+            // Smoothly apporach the new FFT value
+            if (fft_new > fft_old) {
+              fft_new = ALPHA_SIGNAL * fft_old + (1 - ALPHA_SIGNAL) * fft_new;
+            } else {
+              fft_new = ALPHA_SIGNAL * fft_old + (1 - ALPHA_SIGNAL) * fft_new;
+            }
+            freq_bin->value = fft_new;
+
+            // Compute logarithmic value of bin
+            fft_new = 10 * log10(pow(fft_new, 2));
+            freq_bin->value_db = fft_new;
+
+            // If new value is outside min<->max, update the respective limits
+            if (!stats[bin].initialized) {
+              stats[bin].min = fft_new - 1.0f;
+              stats[bin].max = fft_new + 1.0f;
+              stats[bin].avg = fft_new;
+              stats[bin].initialized = true;
+            } else {
+              if (stats[bin].min > fft_new) {
+                stats[bin].min = fft_new;
+              }
+              if (stats[bin].max < fft_new) {
+                stats[bin].max = fft_new;
+              }
+
+              // Update rolling average
+              stats[bin].avg = (1.0 - 1.0/300) * stats[bin].avg + fft_new / 300;
+            }
+        }
     }
 
-// Adjustment for frequency curves.
-  for (int i=0; i < 16; i++) {
-    fftCalc[i] = fftCalc[i] * fftResultPink[i];
-  }
+    // If the Noise-Gate is closed, all final data should be 0 (fftBin simply doesn't get updated)
+    if ((ngState == NG_HOLD_CLOSED) || (ngState == NG_CLOSED) || (ngState == NG_ATTACK)) {
 
-// Manual linear adjustment of gain using sampleGain adjustment for different input types.
-    for (int i=0; i < 16; i++) {
-        fftCalc[i] = fftCalc[i] * sampleGain / 40 + fftCalc[i]/16.0;
+      // FFTResult
+      for (int i=0; i < 16; i++) {
+        fftResult[i] = 0;
+      }
+
+      // micDataSm
+      micDataSm = 0;
+
+    // Noise-Gate is open, store actual results in their respective variables.
+    } else {
+
+      // FFTResult
+      for (int i=0; i < 16; i++) {
+        fftResult[i] =  map(frequency_bins[i].value_db, stats[i].min, stats[i].max, 0, 254);
+      }
+
+      // MicDataSm
+      micDataSm = audioSource->getSampleWithoutDCOffset();
+
+      // fftBin
+      for (int i = 0; i < samples; i++) {
+        fftData_t t = 0.0;
+        t = abs(vReal[i]);
+        t = t / 16.0; // Reduce magnitude. Want end result to be linear and ~4096 max.
+        fftBin[i] = t;
+      }
     }
-
-
-// Now, let's dump it all into fftResult. Need to do this, otherwise other routines might grab fftResult values prematurely.
-    for (int i=0; i < 16; i++) {
-        // fftResult[i] = (int)fftCalc[i];
-        fftResult[i] = constrain((int)fftCalc[i],0,254);
-        fftAvg[i] = (float)fftResult[i]*.05 + (1-.05)*fftAvg[i];
-    }
-
-
-// Looking for fftResultMax for each bin using Pink Noise
-//      for (int i=0; i<16; i++) {
-//          fftResultMax[i] = ((fftResultMax[i] * 63.0) + fftResult[i]) / 64.0;
-//         Serial.print(fftResultMax[i]*fftResultPink[i]); Serial.print("\t");
-//        }
-//      Serial.println(" ");
+    // We sample 512 samples at SAMPLE_RATE Khz. This takes, e.g. 20ms for 512 samples @ 10240 khz
+    // So repeating the loop before SAMPLE_RATE/samples doesn't make sense, so pause the task for that time.
+    vTaskDelayUntil(&xLastWakeTime, (SAMPLE_RATE/samples) / portTICK_RATE_MS);
 
   } // for(;;)
 } // FFTcode()
