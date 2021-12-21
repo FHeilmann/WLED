@@ -8,7 +8,7 @@
    Until this configuration is moved to the webinterface
 */
 
-typedef float fftData_t;
+typedef double fftData_t;
 
 #ifndef MCLK_PIN
     int mclkPin = 0;

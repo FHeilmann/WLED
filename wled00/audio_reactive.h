@@ -320,7 +320,8 @@ void transmitAudioData() {
 
 
 // Create FFT object
-ArduinoFFT<fftData_t> FFT = ArduinoFFT<fftData_t>( vReal, vImag, samples, SAMPLE_RATE, windowWeighingFactors);
+// ArduinoFFT<fftData_t> FFT = ArduinoFFT<fftData_t>( vReal, vImag, samples, SAMPLE_RATE, windowWeighingFactors);
+arduinoFFT FFT = arduinoFFT( vReal, vImag, samples, SAMPLE_RATE );
 
 // FFT main code
 void FFTcode( void * parameter) {
@@ -343,7 +344,8 @@ void FFTcode( void * parameter) {
       vImag[i] = 0;
     }
 
-    FFT.dcRemoval();
+    // FFT.dcRemoval();
+    FFT.DCRemoval();
 
     gate.processSamples(vReal, samples, soundSquelch);
 
@@ -354,18 +356,22 @@ void FFTcode( void * parameter) {
       micDataSm = 0;
     }
 
-    FFT.windowing( FFTWindow::Hamming, FFTDirection::Forward);   // Weigh data
-    FFT.compute( FFTDirection::Forward );                             // Compute FFT
-    FFT.complexToMagnitude();                               // Compute magnitudes
+    // FFT.windowing( FFTWindow::Hamming, FFTDirection::Forward);   // Weigh data
+    // FFT.compute( FFTDirection::Forward );                             // Compute FFT
+    // FFT.complexToMagnitude();                               // Compute magnitudes
+    FFT.Windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+    FFT.Compute(FFT_FORWARD);
+    FFT.ComplexToMagnitude();
 
     //
     // vReal[3 .. 255] contain useful data, each a 20Hz interval (60Hz - 5120Hz).
     // There could be interesting data at bins 0 to 2, but there are too many artifacts.
     //
-    fftData_t peak, magnitude;
-    FFT.majorPeak(peak, magnitude);      // let the effects know which freq was most dominant
-    FFT_MajorPeak = double(peak);
-    FFT_Magnitude = double(magnitude);
+    // fftData_t peak, magnitude;
+    // FFT.majorPeak(peak, magnitude);      // let the effects know which freq was most dominant
+    // FFT_MajorPeak = double(peak);
+    // FFT_Magnitude = double(magnitude);
+    FFT.MajorPeak(&FFT_MajorPeak, &FFT_Magnitude);
     /* This FFT post processing is a DIY endeavour. What we really need is someone with sound engineering expertise to do a great job here AND most importantly, that the animations look GREAT as a result.
     *
     *
